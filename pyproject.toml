@@ -1,0 +1,26 @@
+[project]
+name = "customer-support-mcp"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "aalum2023", email = "153815193+aalum2023@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "mcp[cli]>=2.1.1",
+    "pydantic[email]>=2.13.5",
+    "sqlalchemy>=2.0.52",
+]
+
+[project.scripts]
+customer-support-mcp = "customer_support_mcp:main"
+
+[build-system]
+requires = ["uv_build>=0.12.8,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
