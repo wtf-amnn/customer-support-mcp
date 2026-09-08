@@ -468,4 +468,4 @@ Report only — do not change any ticket."""
 
 if __name__ == "__main__":
     set_current_actor(os.environ.get("MCP_ACTOR", "http-default"))
-    mcp.run(transport="streamable-http", port=3001)
+    mcp.run(transport="stdio")
