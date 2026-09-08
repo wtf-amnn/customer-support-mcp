@@ -1,33 +1,40 @@
 from __future__ import annotations
 
-from app.context import set_current_actor
 import os
 import sys
 from pathlib import Path
+import uvicorn
+from starlette.middleware.cors import CORSMiddleware
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from mcp.server.mcpserver import MCPServer
+# --- every app.* import must come after the line above ---
+from mcp.server import MCPServer
 
+from app.context import set_current_actor
 from app.database import get_session
-from app.schemas import CustomerCreate, CustomerRead
-from app.services.customer_service import DuplicateEmailError, create_customer
-from app.schemas import CustomerRead, TicketRead
+from app.models import KnowledgeArticle
+from app.schemas import (
+    CustomerCreate,
+    CustomerRead,
+    TicketCommentCreate,
+    TicketCreate,
+    TicketRead,
+)
 from app.services.customer_service import (
     CustomerNotFoundError,
+    DuplicateEmailError,
+    create_customer,
     get_customer,
+    list_customers,
 )
-from app.services.ticket_service import TicketNotFoundError, get_ticket
-from app.models import KnowledgeArticle
-from app.schemas import TicketCommentCreate, TicketCreate, TicketRead
-from app.services.customer_service import CustomerNotFoundError, list_customers
 from app.services.ticket_service import (
     InvalidStatusTransitionError,
     TicketNotFoundError,
     add_comment,
     assign_ticket,
-    create_ticket,
     change_ticket_status,
+    create_ticket,
     delete_ticket,
     get_ticket,
     list_tickets,
@@ -467,5 +474,17 @@ def daily_queue_review() -> str:
 Report only — do not change any ticket."""
 
 if __name__ == "__main__":
-    set_current_actor(os.environ.get("MCP_ACTOR", "http-default"))
-    mcp.run(transport="stdio")
+    set_current_actor(os.environ.get("MCP_ACTOR", "local"))
+
+    if os.environ.get("MCP_TRANSPORT") == "http":
+        app = mcp.streamable_http_app()
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["GET", "POST", "OPTIONS", "DELETE"],
+            allow_headers=["*"],
+            expose_headers=["Mcp-Session-Id"],
+        )
+        uvicorn.run(app, host="127.0.0.1", port=3001)
+    else:
+        mcp.run()

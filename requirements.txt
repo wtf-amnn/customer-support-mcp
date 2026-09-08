@@ -1,0 +1,12 @@
+# Convenience file for pip users.
+# pyproject.toml + uv.lock are the authoritative dependency source.
+#
+#   pip install -r requirements.txt
+
+mcp[cli]>=2.0.0,<3.0.0
+sqlalchemy>=2.0.0
+pydantic[email]>=2.0.0
+uvicorn>=0.30.0
+
+# dev
+pytest>=8.0.0

@@ -1,368 +1,302 @@
-Customer Support Operations MCP — best overall
+# Customer Support Operations MCP Server
 
-Build an MCP server through which Claude manages customers and support tickets.
+An MCP server that gives an LLM controlled, validated, auditable access to a relational customer-support system — customers, tickets, comments, and a knowledge base.
 
-Database tables:
+---
 
-customers
-tickets
-ticket_comments
-knowledge_articles
-audit_logs
+## Problem statement
 
-Tools:
+Support work is spread across a ticketing system, customer records, and an internal knowledge base. Answering a single question — *"is this urgent, who should own it, and what does our policy say?"* — means reading from all three and then acting on the first.
 
-create_customer
-create_ticket
-list_tickets
-get_ticket
-assign_ticket
-add_comment
-change_ticket_status
-resolve_ticket
-delete_ticket
+An LLM is well suited to that reasoning, but not to being handed a database. Direct SQL access has no notion of which state transitions are legal, no validation of what a priority or status may be, no record of who changed what, and no guard on destructive operations. The model would be free to move a closed ticket back to open, invent a priority value, or delete a record without confirmation.
 
-Resources:
+This server is the layer in between. Every action the model can take is an explicitly defined tool with a validated input schema, business rules enforced server-side, and an audit entry attributed to a named actor. The model gets enough access to be useful and no more.
 
-customer://profile/{customer_id}
-ticket://details/{ticket_id}
-knowledge://articles/{category}
+---
 
-Reusable prompt:
+## Overview
 
-/triage-ticket
+The server exposes a support-operations database over the Model Context Protocol, implementing all three MCP capabilities:
 
-Claude could handle requests such as:
+- **Tools** — 13 actions the model can call: customer and ticket CRUD, assignment, commenting, and validated status changes.
+- **Resources** — 3 URI-addressed read-only views: a customer profile, an aggregated ticket dossier, and knowledge-base articles by category.
+- **Prompts** — 2 reusable workflows that chain tools and context into a repeatable support procedure.
 
-Find urgent unresolved tickets, summarize each one, and suggest the correct support team.
-Create a ticket for Rahul's payment issue and attach the refund-policy article.
+It runs over stdio (as a local subprocess, e.g. for Claude Desktop) or Streamable HTTP (as a standalone service).
 
-Why this is a proper MCP project:
+---
 
-Tools perform controlled database actions.
-Resources provide customer and knowledge-base context.
-Prompts define repeatable support workflows.
-Claude can chain several tools together.
-Destructive actions can require approval.
-Every action can be written to an audit log.
+## Architecture
 
-This project demonstrates all three primary MCP server capabilities: tools, resources and prompts. MCP server concepts
+The codebase is deliberately layered, and the direction of dependency only ever points downward:
 
-Suggested stack:
+```
+MCP interface   (server.py)          tools, resources, prompts
+      │
+      ▼
+Service layer   (services/)          business rules, audit logging
+      │
+      ▼
+Schemas         (schemas.py)         Pydantic validation
+      │
+      ▼
+Models          (models.py)          SQLAlchemy ORM, constraints
+      │
+      ▼
+Database        (database.py)        engine, session lifecycle
+```
 
-Python
-MCP Python SDK
-SQLite initially
-SQLAlchemy
-Pydantic
-pytest
-Claude Desktop
+The important property is that **the service layer has no knowledge of MCP**. `create_ticket()` is an ordinary Python function taking a validated Pydantic object and a database session. It can be called from a test, a CLI script, or a web API without change. `server.py` is a thin adapter that translates MCP tool calls into service calls and back into JSON.
 
-Resume bullet:
+This is why the seed scripts can reuse the exact same code paths the model uses — including audit logging — with no duplication.
 
-Built a Python MCP server integrating Claude with a relational customer-support system, exposing validated CRUD tools, contextual resources, ticket-triage workflows and audit logging.
+**Validation happens twice, on purpose.** MCP generates an input schema from each tool's type hints, so the protocol layer guarantees `email` is a string. Pydantic then enforces that it is actually an email, that a priority is one of four values, and that a subject is within length limits. Type-correct and valid are different claims.
 
+---
 
-Step 1 — Create the project
+## Tech stack
 
-Open PowerShell:
+| Component | Choice |
+|---|---|
+| Language | Python 3.10+ |
+| MCP | MCP Python SDK v2 (`MCPServer`) |
+| ORM | SQLAlchemy 2.x (typed `Mapped[]` style) |
+| Validation | Pydantic v2 |
+| Database | SQLite |
+| HTTP server | Uvicorn + Starlette (via the SDK) |
+| Package manager | uv |
 
-cd C:\Users\Dell\Desktop\amnnn
+---
 
-mkdir customer-support-mcp
-cd customer-support-mcp
+## Project structure
 
-uv init
-uv add "mcp[cli]" sqlalchemy pydantic
-uv add --dev pytest
-
-Create the project structure:
-
-mkdir app
-mkdir app\services
-mkdir tests
-
-New-Item app\__init__.py
-New-Item app\database.py
-New-Item app\models.py
-New-Item app\schemas.py
-New-Item app\server.py
-
-New-Item app\services\__init__.py
-New-Item app\services\customer_service.py
-New-Item app\services\ticket_service.py
-New-Item app\services\audit_service.py
-
-New-Item tests\__init__.py
-New-Item tests\test_customers.py
-New-Item tests\test_tickets.py
-
-Your structure should be:
-
+```
 customer-support-mcp/
 ├── app/
 │   ├── services/
-│   │   ├── __init__.py
-│   │   ├── audit_service.py
-│   │   ├── customer_service.py
-│   │   └── ticket_service.py
-│   ├── __init__.py
-│   ├── database.py
-│   ├── models.py
-│   ├── schemas.py
-│   └── server.py
-├── tests/
-│   ├── __init__.py
-│   ├── test_customers.py
-│   └── test_tickets.py
+│   │   ├── audit_service.py      # centralized audit logging
+│   │   ├── customer_service.py   # customer CRUD + domain exceptions
+│   │   └── ticket_service.py     # ticket lifecycle, state machine, comments
+│   ├── context.py                # contextvar-based actor identity
+│   ├── database.py               # engine, session factory, init_db
+│   ├── models.py                 # SQLAlchemy models
+│   ├── schemas.py                # Pydantic Create/Update/Read schemas
+│   └── server.py                 # MCP tools, resources, prompts
+├── tests/                        # (not yet implemented)
+├── seed_articles.py              # knowledge-base seed data
+├── seed_data.py                  # customers, tickets, comments seed data
+├── migrate_add_actor.py          # one-off migration: audit_logs.actor
+├── customer_support.db           # SQLite database (generated)
 ├── pyproject.toml
 └── uv.lock
+```
 
-Verify the dependencies:
+---
 
-uv run python -c "import mcp; import sqlalchemy; import pydantic; print('Dependencies installed successfully')"
+## Data model
 
+Five tables:
 
-Step 2 — Create the SQLite database and models
-1. Add the database configuration
+**`customers`** — name, unique email, optional phone, status (`active` / `inactive`), timestamps.
 
-Open app\database.py and paste:
+**`tickets`** — belongs to a customer; subject, description, priority (`low` / `medium` / `high` / `urgent`), status (`open` / `in_progress` / `resolved` / `closed`), optional assigned team, timestamps. Indexed on `(status, priority)` since that is the most common query shape.
 
-from collections.abc import Generator
-from contextlib import contextmanager
-from pathlib import Path
+**`ticket_comments`** — belongs to a ticket; author, body, timestamp.
 
-from sqlalchemy import create_engine, event
-from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+**`knowledge_articles`** — slug (unique, human-readable), title, category, body. Reference content, not operational state.
 
+**`audit_logs`** — action, entity type, entity id, actor, JSON details, timestamp. Written for every mutating operation.
 
-DATABASE_PATH = Path(__file__).resolve().parent.parent / "customer_support.db"
-DATABASE_URL = f"sqlite:///{DATABASE_PATH.as_posix()}"
+Relationships cascade: deleting a customer deletes their tickets, and deleting a ticket deletes its comments. Enum-like columns are guarded by `CheckConstraint`s at the database level in addition to Pydantic validation, so invalid values cannot be written even by code that bypasses the schemas.
 
+---
 
-class Base(DeclarativeBase):
-    """Base class for all database models."""
+## Tools
 
-    pass
+All tools return either a JSON object (or list) on success, or `{"error": "..."}` on failure. Errors are returned rather than raised so the model receives something readable and actionable instead of a traceback.
 
+### Customer tools
 
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False},
-)
+| Tool | Arguments | Behavior |
+|---|---|---|
+| `create_customer_tool` | `name`, `email`, `phone?` | Creates a customer. Returns `error` if the email already exists. |
+| `get_customer_tool` | `customer_id` | Fetches one customer. Returns `error` if not found. |
+| `list_customers_tool` | `status?`, `limit?` | Lists customers, optionally filtered by status. |
 
+### Ticket tools
 
-@event.listens_for(engine, "connect")
-def enable_sqlite_foreign_keys(
-    dbapi_connection,
-    connection_record,
-) -> None:
-    """Enable foreign-key enforcement for every SQLite connection."""
-    cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA foreign_keys=ON")
-    cursor.close()
+| Tool | Arguments | Behavior |
+|---|---|---|
+| `create_ticket_tool` | `customer_id`, `subject`, `description`, `priority?` | Creates a ticket. Verifies the customer exists first, so a bad id yields a clear "no customer" error rather than a foreign-key violation. New tickets always start `open`. |
+| `list_tickets_tool` | `status?`, `priority?`, `customer_id?`, `limit?` | Lists tickets; filters combine with AND. Invalid filter values return an error listing the valid options. |
+| `get_ticket_tool` | `ticket_id` | Fetches one ticket record. |
+| `assign_ticket_tool` | `ticket_id`, `team` | Assigns a ticket to a team. Team names are free-form by design. |
+| `add_comment_tool` | `ticket_id`, `author`, `body` | Adds a comment to a ticket. |
+| `change_ticket_status_tool` | `ticket_id`, `new_status` | Changes status, enforcing the transition graph below. |
+| `resolve_ticket_tool` | `ticket_id` | Convenience wrapper that routes through the same validated transition path. |
+| `delete_ticket_tool` | `ticket_id`, `confirm` | Permanently deletes a ticket and its comments. Refuses unless `confirm=true`. |
 
+### Context tools
 
-SessionLocal = sessionmaker(
-    bind=engine,
-    autoflush=False,
-    expire_on_commit=False,
-)
+| Tool | Arguments | Behavior |
+|---|---|---|
+| `get_ticket_details_tool` | `ticket_id` | Returns the aggregated ticket dossier — ticket, customer, and full comment thread — as readable text. |
+| `get_knowledge_articles_tool` | `category` | Returns all knowledge-base articles in a category as readable text. |
 
+These two are thin wrappers over the resource functions of the same name. See *Resources vs tools* below for why both exist.
 
-@contextmanager
-def get_session() -> Generator[Session, None, None]:
-    """Provide a database session with rollback on failure."""
-    session = SessionLocal()
+### Ticket status transitions
 
-    try:
-        yield session
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
+`change_ticket_status_tool` enforces a state machine rather than allowing arbitrary overwrites:
 
+| From | Allowed to |
+|---|---|
+| `open` | `in_progress`, `closed` |
+| `in_progress` | `resolved`, `open`, `closed` |
+| `resolved` | `closed`, `in_progress` (reopened) |
+| `closed` | — terminal |
 
-def init_db() -> None:
-    """Create all database tables."""
-    from app import models  # noqa: F401
+The valid transitions are also written into the tool's description, so the model knows the rules before calling rather than discovering them through failed attempts. Tool descriptions are treated as prompt engineering, not documentation.
 
-    Base.metadata.create_all(bind=engine)
-2. Add the database models
+---
 
-Open app\models.py and paste:
+## Resources
 
-from __future__ import annotations
+Resources are read-only, URI-addressed context.
 
-from datetime import datetime, timezone
+**`customer://profile/{customer_id}`** — A customer's profile as formatted text.
 
-from sqlalchemy import (
-    CheckConstraint,
-    DateTime,
-    ForeignKey,
-    Index,
-    String,
-    Text,
-)
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+**`ticket://details/{ticket_id}`** — The full picture for one ticket: its fields, the customer who raised it, and the entire comment history in order. This traverses the ORM relationships to assemble in one read what would otherwise take several tool calls to stitch together.
 
-from app.database import Base
+**`knowledge://articles/{category}`** — Every knowledge-base article in a category, rendered as a single document. Categories currently seeded: `billing`, `account`.
 
+### Resources vs tools
 
-def utc_now() -> datetime:
-    """Return the current UTC time."""
-    return datetime.now(timezone.utc)
+The distinction that matters is **who initiates the read**:
 
+- **Tools are model-controlled.** The model decides to call them, mid-conversation.
+- **Resources are application- or user-controlled.** The host application surfaces them for a person to attach as context. The model cannot autonomously go and fetch one.
 
-class Customer(Base):
-    __tablename__ = "customers"
-    __table_args__ = (
-        CheckConstraint(
-            "status IN ('active', 'inactive')",
-            name="customer_status_check",
-        ),
-    )
+This has a direct practical consequence, discovered while testing: a workflow prompt that instructed the model to *"read `ticket://details/3`"* could not be carried out, because the model has no mechanism to fetch a resource on its own.
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(100), nullable=False)
-    email: Mapped[str] = mapped_column(
-        String(255),
-        unique=True,
-        index=True,
-        nullable=False,
-    )
-    phone: Mapped[str | None] = mapped_column(String(30))
-    status: Mapped[str] = mapped_column(
-        String(20),
-        default="active",
-        nullable=False,
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=utc_now,
-        nullable=False,
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=utc_now,
-        onupdate=utc_now,
-        nullable=False,
-    )
+The fix was to expose the same underlying functions as tools as well (`get_ticket_details_tool`, `get_knowledge_articles_tool`) and point the prompts at those. The resources remain, because they still serve their own purpose — a person can attach a ticket dossier or a policy category directly to a conversation with no tool call involved.
 
-    tickets: Mapped[list[Ticket]] = relationship(
-        back_populates="customer",
-        cascade="all, delete-orphan",
-    )
+**Rule of thumb: resources are for the human, tools are for the model.** If a workflow needs the model to reach data unprompted, it must be a tool.
 
+---
 
-class Ticket(Base):
-    __tablename__ = "tickets"
-    __table_args__ = (
-        CheckConstraint(
-            "priority IN ('low', 'medium', 'high', 'urgent')",
-            name="ticket_priority_check",
-        ),
-        CheckConstraint(
-            "status IN ('open', 'in_progress', 'resolved', 'closed')",
-            name="ticket_status_check",
-        ),
-        Index("ticket_status_priority_index", "status", "priority"),
-    )
+## Prompts
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    customer_id: Mapped[int] = mapped_column(
-        ForeignKey("customers.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    subject: Mapped[str] = mapped_column(String(200), nullable=False)
-    description: Mapped[str] = mapped_column(Text, nullable=False)
-    priority: Mapped[str] = mapped_column(
-        String(20),
-        default="medium",
-        nullable=False,
-    )
-    status: Mapped[str] = mapped_column(
-        String(20),
-        default="open",
-        nullable=False,
-    )
-    assigned_team: Mapped[str | None] = mapped_column(String(100))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=utc_now,
-        nullable=False,
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=utc_now,
-        onupdate=utc_now,
-        nullable=False,
-    )
+Prompts are user-invoked, parameterized workflow templates. They are not system prompts, and the model does not trigger them itself — the host surfaces them (typically as a slash command) and the user runs one.
 
-    customer: Mapped[Customer] = relationship(back_populates="tickets")
-    comments: Mapped[list[TicketComment]] = relationship(
-        back_populates="ticket",
-        cascade="all, delete-orphan",
-    )
+### `triage-ticket(ticket_id)`
 
+A structured triage procedure for a single ticket. It directs the model to:
 
-class TicketComment(Base):
-    __tablename__ = "ticket_comments"
+1. Read the full ticket dossier, including customer and comment history.
+2. Check the customer's other tickets for a recurring or escalating pattern.
+3. Read the relevant knowledge-base category.
+4. Report a summary, a judgment on whether the current priority is right, a recommended owning team, any applicable article, and a next action.
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    ticket_id: Mapped[int] = mapped_column(
-        ForeignKey("tickets.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    author: Mapped[str] = mapped_column(String(100), nullable=False)
-    body: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=utc_now,
-        nullable=False,
-    )
+It ends by instructing the model to present its recommendation and wait rather than acting — a workflow-level counterpart to the tool-level `confirm` guard.
 
-    ticket: Mapped[Ticket] = relationship(back_populates="comments")
+### `daily-queue-review()`
 
+A standing, parameterless workflow that reasons across the whole queue rather than drilling into one record. It reviews open and in-progress tickets and surfaces urgent tickets that are unassigned, tickets where the customer commented more recently than the support team, and customers with more than one open ticket.
 
-class AuditLog(Base):
-    __tablename__ = "audit_logs"
+That last item is deliberate: no single tool answers "which customers have multiple open tickets." Rather than adding a narrow `find_escalations` tool, the prompt describes the analysis and lets the model perform it over `list_tickets_tool` results. This is what prompts unlock that tools alone do not.
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    action: Mapped[str] = mapped_column(String(100), nullable=False)
-    entity_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    entity_id: Mapped[int | None] = mapped_column(index=True)
-    details: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=utc_now,
-        nullable=False,
-    )
+---
 
+## Design decisions
 
-Create the tables
+**The service layer does not commit.** `log_action()` and every service function call `session.flush()`, never `session.commit()`. The caller's session context manager owns the transaction, so an audit entry and the action it describes succeed or fail together. A failed operation leaves no misleading log entry behind.
 
-Run from the project root:
+**Domain exceptions, not sentinel returns.** Services raise `CustomerNotFoundError`, `DuplicateEmailError`, `TicketNotFoundError`, and `InvalidStatusTransitionError`. The MCP layer catches these specifically and converts them into clean error messages, which keeps SQLAlchemy internals out of the model's view.
 
-uv run python -c "from app.database import init_db; init_db(); print('Database initialized successfully')"
+**Actor identity via context variables.** The audit log records *who*, not just *what*. Rather than threading an `actor` parameter through every service signature, identity lives in a `contextvars.ContextVar` set once at the entry point. Only `audit_service.py` reads it; no other service function changed. `actor_context()` scopes it correctly with proper reset semantics, which is what per-request identity requires under concurrency.
 
-Expected output:
+**Confirmation on destructive actions.** `delete_ticket_tool` refuses to act unless `confirm=true`, and its description states the action is irreversible. Combined with the host's own tool-approval prompt and the prompts' present-then-wait instruction, deletion has three independent checkpoints.
 
-Database initialized successfully
+**Filter normalization and explicit validation.** `list_tickets_tool` strips and lowercases its filters (so `""`, `"  "`, and `"Open "` all behave sensibly) and rejects unrecognized values with a message listing the valid ones. Without this, a typo and a genuinely empty result are indistinguishable — the model would report "there are no tickets" when it had simply passed a bad filter. Bad input and an empty result must never look the same.
 
-A new file should appear:
+**Idempotent seeds and migrations.** Both seed scripts skip records that already exist, and `migrate_add_actor.py` checks for the column before altering the table. All three are safe to run repeatedly.
 
-customer_support.db
-4. Confirm the tables
+---
 
-Run:
+## Setup
 
-uv run python -c "from sqlalchemy import inspect; from app.database import engine; print(inspect(engine).get_table_names())"
+```bash
+uv sync                       # or: pip install -r requirements.txt
 
-Expected result:
+# create tables
+uv run python -c "from app.database import init_db; init_db()"
 
-['audit_logs', 'customers', 'ticket_comments', 'tickets']
+# seed data
+uv run seed_articles.py
+uv run seed_data.py           # add --reset to wipe existing records first
+```
+
+### Running
+
+**stdio** (default — for Claude Desktop and other local hosts):
+
+```bash
+uv run app/server.py
+```
+
+**Streamable HTTP** (for the MCP Inspector or a remote client), on port 3001 at `/mcp`:
+
+```bash
+MCP_TRANSPORT=http uv run app/server.py
+```
+
+The HTTP entry point builds the ASGI app explicitly and adds CORS middleware exposing the `Mcp-Session-Id` header, which browser-based clients such as the Inspector require for session tracking.
+
+Environment variables:
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `MCP_TRANSPORT` | Set to `http` for Streamable HTTP; otherwise stdio | stdio |
+| `MCP_ACTOR` | Identity recorded in the audit log | `local` |
+
+### Connecting Claude Desktop
+
+Claude Desktop launches the server itself over stdio. In `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "customer-support": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/customer-support-mcp", "run", "app/server.py"],
+      "env": { "MCP_ACTOR": "your-name@claude-desktop" }
+    }
+  }
+}
+```
+
+Note that Claude Desktop cannot reach the HTTP mode on `localhost`: custom connectors are fetched from Anthropic's infrastructure, so `127.0.0.1` there refers to their host, not yours. Reaching it that way requires a public HTTPS URL (via a tunnel or a deployment).
+
+### Inspecting
+
+```bash
+npx -y @modelcontextprotocol/inspector uv run app/server.py    # stdio
+npx -y @modelcontextprotocol/inspector                          # then connect to http://127.0.0.1:3001/mcp
+```
+
+---
+
+## Limitations and future work
+
+**No test suite.** `tests/` is scaffolded but empty. The service layer was built to be testable — pure functions over an injected session — so the main task is a fixture providing an isolated database per test rather than the live `customer_support.db`.
+
+**SQLite write concurrency.** SQLite serializes writes. This is fine for a single stdio client, but under HTTP with concurrent requests it will produce `database is locked` errors. Everything goes through SQLAlchemy, so migrating to PostgreSQL is largely a connection-string change — though the SQLite-specific `PRAGMA foreign_keys` hook and `check_same_thread` connection argument would become dead code, and `DuplicateEmailError` depends on catching an `IntegrityError` that Postgres raises differently.
+
+**Actor identity is asserted, not authenticated.** `MCP_ACTOR` is configuration, not proof. Over stdio that is defensible — the host launched the process. Over HTTP it is not: identity should come from a verified token per request, which is what `actor_context()` was designed to support but which is not yet wired up.
+
+**Schema changes are manual.** Tables are created with `create_all()`, which cannot alter existing tables — hence the hand-written `migrate_add_actor.py`. Alembic would replace this properly.
+
+**Customer update and delete are not exposed.** `update_customer()` and `delete_customer()` exist and are tested manually in the service layer, but no MCP tool wraps them. Deleting a customer cascades to all their tickets and comments, so exposing it warrants at least the same confirmation guard as ticket deletion.
+
+**Knowledge-base categories are implicit.** `billing` and `account` are conventions established by the seed data, not constrained values. A category with no articles returns an empty-result message rather than an error.
